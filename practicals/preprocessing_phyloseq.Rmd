@@ -1,0 +1,316 @@
+---
+title: "Preprocessing : phyloseq"
+date: "December 2023"
+output:
+  html_notebook:
+  html_document:
+author:
+  - "Midoli Goto"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warnings = FALSE)
+```
+
+## Prepare workspace
+
+Load `phyloseq`
+
+```{r}
+library(phyloseq)
+```
+
+We import the ASV table, the taxonomic assignment results and the sequences from the text files
+we exported in the [dada2 practical](/practicals/preprocessing_dada2.html#export-asv-table).
+
+Define where the previous practical outputs are located:
+
+```{r}
+input_dir <- here::here("outputs", "dada2", "asv_table")
+```
+
+Import the ASV table:
+
+```{r}
+asv_table <- read.table(file = file.path(input_dir, "asv_table.tsv"),
+                        header = TRUE,
+                        sep = "\t",
+                        row.names = 1)
+```
+
+Change name barcoding id
+```{r}
+colnames(asv_table) <- gsub("\\.", "_", colnames(asv_table))
+```
+
+List mock T- T+ to remove
+```{r}
+# List mock T- T+ to remove
+colonnes_a_exclure <- c("mock1_1", "mock1_2", "mock2_1", "mock2_2", "mock3_1", "mock3_2", "T_1_1", "T_1_2", "T_2_1", "T_2_2")
+# Remove list
+asv_table <- asv_table[, -match(colonnes_a_exclure, names(asv_table))]
+
+```
+the results of the taxonomic assignment:
+
+```{r}
+taxonomy <- read.table(file = file.path(input_dir, "taxonomy.tsv"),
+                        header = TRUE,
+                        sep = "\t",
+                        row.names = 1)
+```
+
+and the ASV sequences:
+
+```{r}
+asv_seq <- Biostrings::readDNAStringSet(
+  filepath = file.path(input_dir, "asv.fasta"),
+  format = "fasta"
+)
+```
+
+We will also need some information about the samples,
+the file is located is another folder.
+
+```{r}
+context <- read.table(here::here("data",
+                                 "context",
+                                 "mapfileFA.txt"),
+                      header = TRUE,
+                      row.names = 1, check.names = FALSE)
+```
+
+## Get a phyloseq object
+
+### Check sample file
+
+
+Make sure sample names in the ASV table...
+
+```{r}
+colnames(asv_table) |> sort()
+```
+
+match sample table ids.
+
+
+```{r}
+row.names(context) |> sort()
+```
+
+You can do it in a more formal way using the function `setdiff()`.
+This function returns the elements of `x` not present in `y`.
+
+
+```{r}
+setdiff(x = colnames(asv_table),
+        y = row.names(context))
+```
+
+Perfect! The ASV table sample names match with the contextual data table.
+
+### Assemble ASV table, taxonomy and contextual data
+
+Use the `phyloseq::phyloseq()` function to create a phyloseq object.
+A phyloseq object is usually composed by an ASV table, a taxonomy table and 
+a table describing the samples. You can also add ASV sequences and a [phylogenetic
+tree](#add-phylogenetic-tree-optional)
+
+```{r}
+physeq <- phyloseq::phyloseq(
+  phyloseq::otu_table(asv_table, taxa_are_rows = TRUE),
+  phyloseq::tax_table(as.matrix(taxonomy)),
+  phyloseq::sample_data(context),
+  phyloseq::refseq(asv_seq)
+)
+```
+
+```{r}
+physeq <- phyloseq::phyloseq(
+  phyloseq::otu_table(asv_table, taxa_are_rows = TRUE),
+  phyloseq::tax_table(as.matrix(taxonomy)),
+  phyloseq::sample_data(mapfile),
+  phyloseq::refseq(asv_seq)
+)
+```
+
+## Add a phylogenetic tree
+
+### Why?
+
+Knowing the ASVs phylogenetic relatedness will help you to have a better understanding
+of the communities your studying.
+
+To quote the evolutionary biologist Theodosius Dobzhansky:
+
+> Nothing in Biology Makes Sense Except in the Light of Evolution.
+
+A phylogenetic tree reconstructed from the ASV sequences will be used to measure their
+relatedness.
+
+### Alignment using DECIPHER
+
+Before reconstructing a phylogenetic tree we need to align the ASVs sequences.
+
+```{r results=FALSE}
+aln <- refseq(physeq) |>
+  DECIPHER::AlignSeqs(anchor = NA)
+```
+
+Once it is done, you can visualise the alignment using the function `DECIPHER::BrowseSeqs()`
+
+```{r}
+DECIPHER::BrowseSeqs(aln, highlight = 0)
+```
+
+### Infering the phylogenetic tree
+
+We will infer a phylogenetic from our alignement using the library `phangorn`.
+
+First, let's convert our `DNAStringSet` alignment to the `phangorn` `phyDat` format.
+
+```{r}
+phang_align <- as.matrix(aln) |> phangorn::phyDat(type = "DNA")
+```
+
+Then, we compute pairwise distances of our aligned sequences
+using equal base frequencies (JC69 model used by default).
+
+```{r}
+dm <- phangorn::dist.ml(phang_align, model = "JC69")
+```
+
+Finally, we reconstruct a neighbour joining tree. 
+```{r}
+treeNJ <- phangorn::NJ(dm)
+```
+
+Other approaches to reconstruct a phylogenetic tree exist.
+If you want to try them with `phangorn`, have a look
+[here](https://cran.r-project.org/web/packages/phangorn/vignettes/Trees.html)
+
+We need the tree to be rooted for future analysis.
+We can do that using the function `phangorn::midpoint()`
+
+```{r}
+treeNJ <- phangorn::midpoint(tree = treeNJ)
+```
+
+Once we have a rooted tree, we can add it to the phyloseq object.
+
+```{r}
+physeq <- phyloseq::merge_phyloseq(physeq,treeNJ)
+```
+
+### If I do not have a tree
+
+For some reasons, it is sometimes not relevant or not possible to infer a tree
+from our data.
+
+For example, the metabarcode you are using is not carrying enough
+phylogenetic information to reconstruct a tree.
+
+Or you have so many ASVs that infering a tree would require more computational
+ressource that what you can afford.
+
+In that case, it is fine. You will still be able to perform most of the analyses
+introduced in the [alpha](/practicals/alpha_diversity.html) and
+[beta diversity](/practicals/beta_diversity.html) practicals.
+
+## Extract information from a phyloseq object
+
+Here a list of `phyloseq` functions to extract diverse information
+from your `phyloseq` object.
+
+* **Get the total number of ASVs**
+
+```{r}
+phyloseq::ntaxa(physeq)
+```
+
+* **Get the total number of samples**
+
+```{r}
+phyloseq::nsamples(physeq)
+```
+
+* **Get sample names**
+```{r}
+phyloseq::sample_names(physeq)
+```
+
+* **Get ASV identification**
+```{r}
+phyloseq::taxa_names(physeq) |> head()
+```
+
+* **Get the names of variables in sam_data**
+```{r}
+phyloseq::sample_variables(physeq)
+```
+
+* **Display all variables with values**
+```{r}
+phyloseq::get_variable(physeq)
+```
+
+* **Sum the reads by sample**
+```{r}
+phyloseq::sample_sums(physeq)
+```
+
+* **Sum the reads by species/taxa/OTUs (for all samples)**
+```{r}
+phyloseq::taxa_sums(physeq) |> head()
+```
+
+* **Sort species/taxa/OTUs by number of reads**
+```{r}
+phyloseq::taxa_sums(physeq) |>
+  sort(decreasing = TRUE) |>
+  head()
+```
+
+* **Get taxonomic ranks (useful for other commands)**
+
+```{r}
+phyloseq::rank_names(physeq)
+```
+
+* **Show abundance of a given ASV**
+```{r}
+phyloseq::get_sample(physeq, i = "70920f490e5af8c263db656e98c426b9dc03f370")
+```
+
+* **Show ASVs and abundance for a given sample**
+```{r}
+phyloseq::get_taxa(physeq, i = "S_F002_B") |> head()
+```
+
+* **Get phyla detected in your samples**
+
+```{r}
+phyloseq::get_taxa_unique(physeq, taxonomic.rank = "Phylum")
+```
+
+If you do not remember the name of the taxonomic ranks in your
+phyloseq object use `phyloseq::rank_names(physeq)`
+
+* **Number of ASVs per phylum**
+
+```{r}
+table(phyloseq::tax_table(physeq)[, "Phylum"])
+```
+
+You can also plot a barchart to visualise the results.
+
+```{r}
+plot_bar(physeq, fill = "Phylum")
+```
+
+More about plots in the alpha and beta diversity practicals.
+
+saveRDS(physeq, file = "/home/midoli/Documents/RESULTS_SEQUENCAGE_METABARCOD_nicolas/course-material-main/data/asv_table/mon_objet_phyloseq.rds")

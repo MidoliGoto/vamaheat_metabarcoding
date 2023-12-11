@@ -1,0 +1,529 @@
+---
+title: "Preprocessing : dada2"
+date: "December 2023"
+output: html_document
+author:
+  - "Midoli Goto"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r include = FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warnings = FALSE)
+```
+
+### Download the reference database
+
+Save as a variable the path to the folder where you will place the references databases.
+
+```{r}
+refdb_folder <- here::here("data", "refdb")
+refdb_folder
+```
+
+Now, let's create the folder directly from R:
+
+```{r}
+if (!dir.exists(refdb_folder)) dir.create(refdb_folder)
+```
+
+You can also create the folder from RStudio in the `Files` window
+
+**Tip:** You can access the documentation of any R function using `?` in the console. If you to know everything about the function `dir.create()`, simply run `?dir.create()`
+
+The Silva reference database, commonly used to assign 16S metabarcoding data, will be used in practical.
+
+In case you are working with 18S sequences, you will have better assignements using PR2 (https://pr2-database.org/) or EukRibo (https://doi.org/10.5281/zenodo.6327891) especially if you are interested in protists.
+
+The following code downloads dada2 formated silva reference databases. If you are not confortable with it, you can simply download the reference database files from your web browser [here](%22https://zenodo.org/record/4587955/files/silva_nr99_v138.1_train_set.fa.gz%22) and [here](%22https://zenodo.org/record/4587955/files/silva_species_assignment_v138.1.fa.gz%22).
+
+```{r}
+# R stop dowloading after timeout which is
+# 60 seconds by default
+getOption("timeout")
+
+# so we change timeout to be 20 minutes
+options(timeout = 1200)
+
+# we save in variable the path to the refdb
+# in the working space
+silva_train_set <- file.path(refdb_folder,
+                             "silva_nr99_v138.1_train_set.fa.gz")
+
+silva_species_assignment <- file.path(refdb_folder,
+                                      "silva_species_assignment_v138.1.fa.gz")
+
+# then we download the files if they don't already exist
+
+if (!file.exists(silva_train_set)) {
+  download.file(
+    "https://zenodo.org/record/4587955/files/silva_nr99_v138.1_train_set.fa.gz",
+    silva_train_set,
+    quiet = TRUE
+  )
+}
+
+if (!file.exists(silva_species_assignment)) {
+  download.file(
+    "https://zenodo.org/record/4587955/files/silva_species_assignment_v138.1.fa.gz",
+    silva_species_assignment,
+    quiet = TRUE
+  )
+}
+
+```
+
+### Attach custom functions
+
+We will use in this practical R functions especially written for this course. The "classic" way to import functions is to use `source()` with the name of the R script to source.
+
+Instead, we use `devtools::load_all()`. This function will source all the scripts from the folder `R/` along with the documentation in `man/` \`
+
+```{r}
+devtools::load_all()
+```
+
+## Inputs files
+
+### Locate the sequencing files
+
+Save the path to the directory containing your raw data (paired-end sequencing fastq files) in a variable named `path_to_fastqs`
+
+```{r}
+path_to_fastqs <- here::here("data", "raw")
+```
+
+The [gzipped](https://en.wikipedia.org/wiki/Gzip) (compressed) [FASTQ](https://en.wikipedia.org/wiki/FASTQ_format) formated "forward" (R1) and "reverse" (R2) files are named as follow:
+
+-   `${SAMPLENAME}_R1.fastq.gz` for the forward files
+-   `${SAMPLENAME}_R2.fastq.gz` for the reverse files.
+
+We list the forward files using the function `list.files()`. The argument `pattern` gives you the possibility to only select file names matching a regular expression. In our case, we select all file names finising by `_R1.fastq.gz`.
+
+```{r}
+fnFs <- sort(list.files(path_to_fastqs,
+                        pattern = "_R1.fastq.gz",
+                        full.names = TRUE))
+```
+
+We do the same for reverse samples.
+
+```{r}
+fnRs <- sort(list.files(path_to_fastqs,
+                        pattern = "_R2.fastq.gz",
+                        full.names = TRUE))
+```
+
+**To understand:** What fnFs & fnRs variables contain?
+
+```{r}
+head(fnFs)
+```
+
+### Extract sample names
+
+```{r}
+sample_names <- basename(fnFs) |>
+  strsplit(split = "_") |>
+  sapply(`[`, 1)
+```
+
+**To understand:**
+
+`basename()`: remove path to only keep file name.
+
+`|>`: R "pipe". It allows you to chain functions, avoiding intermediate variables and nested parenthesis. It basically transfers the output of the left expression to the input of the right expression. You need R \> 4.1 to use this pipe, otherwise use `%>%` from [`magrittr`](https://magrittr.tidyverse.org/).
+
+`strsplit()`: split character chain according to a defined pattern. `?strsplit` for documentation.
+
+`sapply()`: apply a function to each element of a list or vector. The output is simplified to be vector.
+
+Let's go step by step. First list the R1 file names.
+
+```{r}
+basename(fnFs) |>
+  head()
+```
+
+We can see that the sample name is before the first `_`. With `strsplit()`, we can split each file name into a 2 elements vector. The result is a list of 2 elements vectors.
+
+```{r}
+basename(fnFs) |>
+  strsplit(split = "_") |>
+  head()
+```
+
+Now, We just have to extract the first element for each file.
+
+```{r}
+basename(fnFs) |>
+  strsplit(split = "_") |>
+  sapply(`[`, 1) |>
+  head()
+```
+
+**Tip:** you can achieve the same thing using regular expressions:
+
+```{r}
+gsub("^.+/|_.+$", "", fnFs) |> head()
+```
+
+Regular expressions are extremly useful. If you are keen to learn how to use them, have a look [here](https://bookdown.org/rdpeng/rprogdatascience/regular-expressions.html)
+
+## Sequence quality check
+
+We use a custom function, `qualityprofile()`, implemented in `R/preprocessing.R` to check the quality of the raw sequences.
+
+Run `?qualityprofile` to know more about this function.
+
+```{r results=FALSE}
+# create a directory for the outputs
+quality_folder <- here::here("outputs",
+                             "dada2",
+                             "quality_plots")
+
+if (!dir.exists(quality_folder)) {
+  dir.create(quality_folder, recursive = TRUE)
+}
+
+qualityprofile(fnFs,
+               fnRs,
+               file.path(quality_folder, "quality_plots.pdf"))
+```
+
+**Open the the pdf file generated by `qualityprofile()`**
+
+## Primer removal
+
+### Prepare outputs
+
+We first create a folder where to save the reads once they are trimmed:
+
+```{r}
+path_to_trimmed_reads <- here::here("outputs",
+                                    "dada2",
+                                    "trimmed")
+
+if (!dir.exists(path_to_trimmed_reads)) dir.create(path_to_trimmed_reads)
+```
+
+Then we prepare a list of paths where to save the results (*e.g.* sequences without primers)
+
+```{r}
+nopFw <- file.path(path_to_trimmed_reads, basename(fnFs))
+nopRv <- file.path(path_to_trimmed_reads, basename(fnRs))
+
+head(nopFw)
+```
+
+### Remove primers
+
+The data we are working with correspond to the V4-V5 region using the Parada primers 515F-Y (`GTGYCAGCMGCCGCGGTAA`) and 926R (`CCGYCAATTYMTTTRAGTTT`) Save into variables the forward and reverse primers.
+
+```{r}
+primer_fwd  <- "GTGYCAGCMGCCGCGGTAA"
+primer_rev  <- "CCGYCAATTYMTTTRAGTTT"
+```
+
+Let's have a closer look to sequences:
+
+```{r}
+seq_zoom <- Biostrings::readDNAStringSet(fnFs[1],
+                             format = "fastq",
+                             nrec = 10)
+
+seq_zoom
+```
+
+Use the function `dada2::removePrimers()` twice to remove the primers from forward `fnFs` and reverse `fnRs` reads and save the results in `nopFs` and `nopRs` respectively.
+
+```{r}
+dada2::removePrimers(fn = fnFs,
+                     fout = nopFw,
+                     primer.fwd = primer_fwd,
+                     max.mismatch = 3,
+                     verbose = TRUE)
+
+dada2::removePrimers(fn = fnRs,
+                     fout = nopRv,
+                     primer.fwd = primer_rev,
+                     max.mismatch = 3,
+                     verbose = TRUE)
+```
+
+
+## Trimming and quality filtering
+
+#### Prepare outputs
+
+Same as before, create a folder
+
+```{r}
+path_to_filtered_reads <- here::here("outputs", "dada2", "filtered")
+if (!dir.exists(path_to_filtered_reads)) dir.create(path_to_filtered_reads)
+```
+
+and list paths:
+
+```{r}
+filtFs <- file.path(path_to_filtered_reads, basename(fnFs))
+filtRs <- file.path(path_to_filtered_reads, basename(fnRs))
+```
+
+To make the link between files and sample names, simply name the file names vector using the sample names
+
+```{r}
+names(filtFs) <- sample_names
+names(filtRs) <- sample_names
+```
+
+#### Use `dada2::filterAndTrim()`
+
+Let's have a look at what the function is doing. To do so, type `?dada2::filterAndTrim()` in the console.
+
+Let's run the function.
+
+```{r}
+(out <- dada2::filterAndTrim(
+  fwd = nopFw,
+  filt = filtFs,
+  rev = nopRv,
+  filt.rev = filtRs,
+  minLen = 150,
+  matchIDs = TRUE,
+  maxN = 0,
+  maxEE = c(2, 4),
+  truncQ = 2
+))
+```
+
+**What happened?**
+
+Details about the function arguments: \* **nopFw** : input, where the forward reads without primers are (path) \* **filtFs** : output, where forward filtered reads are written (path) \* **nopRv** and **filRs** : same as above, but wiht reverse reads \* **TruncLen** : truncate reads after truncLen bases. Reads shorter than that are discarded. Exple : TruncLen=c(200,150), means forward and reverse reads are cut at 200 bp and 150 bp respectively. \* **TrimLeft** : number of nucleotides to remove from the start \* **Trimright** : number of nucleotides to remove from the end \* **maxN** : max number of ambiguous bases accepted \* **maxEE** : read expected errors (EE) threshold. The EE of a read is the sum of the error probability of each base composing it. Increase that value to accept more low quality reads. The first value refers to the forward reads and the second to the reverse reads. \* **TruncQ=2**: truncate reads at the first instance of a quality score less than or equal to truncQ.
+
+## Denoising
+
+### Learn the error model
+
+To be able to denoise your data, you need an error model. The error model will tell you at which rate a nucleotide is replace by another for a given quality score. For example, for a quality score Q of 30, what is the probability of an A being wrongly read as a T.
+
+This error model can be learnt directly from the data with the function `dada2::learnErrors()`. You can come back to the [course](/courses/dada2.html#/dada2-workflow-denoising-approach) for more details about the maths behind.
+
+```{r}
+errF <- dada2::learnErrors(filtFs,
+                           randomize = TRUE,
+                           multithread = TRUE)
+
+errR <- dada2::learnErrors(filtRs,
+                           randomize = TRUE,
+                           multithread = TRUE)
+```
+
+You can visualise the resulting error model using the function `dada2::plotErrors()`
+
+```{r}
+dada2::plotErrors(errF, nominalQ=TRUE)
+```
+
+### Dereplication
+
+Before denoising, we need to dereplicate the sequences. It means, for each unique sequence, count the number of reads.
+
+The dereplication is achieved using the function `dada2::derepFastq()`
+
+```{r}
+derepFs <- dada2::derepFastq(filtFs, verbose = TRUE)
+
+derepRs <- dada2::derepFastq(filtRs, verbose = TRUE)
+```
+
+### Run dada
+
+Now we are ready to run the denoising algorithm with `dada2::dada()`. As input, we need the error model and the dereplicated sequences.
+
+```{r}
+dadaFs <- dada2::dada(derepFs, err = errF, multithread = TRUE)
+
+dadaRs <- dada2::dada(derepRs, err = errR, multithread = TRUE)
+```
+
+## Merge paired-end reads
+
+Once forward and reverse reads have been denoised, we can merge them with `dada2::mergePairs()`.
+
+```{r}
+mergers <- dada2::mergePairs(
+  dadaF = dadaFs,
+  derepF = derepFs,
+  dadaR = dadaRs,
+  derepR = derepRs,
+  maxMismatch = 0,
+  verbose = TRUE
+)
+```
+
+## Build the ASV table
+
+At this point we have ASVs and we know their number of reads in each sample. We have enough information to build an ASV table.
+
+```{r}
+seqtab <- dada2::makeSequenceTable(mergers)
+```
+
+## Remove Chimera
+
+Chimeras are artifact sequences formed by two or more biological sequences incorrectly joined together. We find and remove bimeras (two-parent chimeras) using the function `dada2::removeBimeraDenovo()`
+
+```{r}
+seqtab_nochim <- dada2::removeBimeraDenovo(seqtab,
+                                           method = "consensus",
+                                           multithread = TRUE,
+                                           verbose = TRUE)
+```
+
+## Taxonomic assignment from dada2
+
+The ASV table is ready. But without a clue about the ASVs taxonomic identity, we won't go far in ecological interpretations. We can have an idea of ASV taxonomic identity comparing their sequences to references databases such as SILVA.
+
+The taxonomic assignment is done in two steps.
+
+First, each ASV is assigned to a taxonomy using the RDP Naive Bayesian Classifier algorithm described in [Wang et al. 2007](https://doi.org/10.1128/aem.00062-07) called by the function `dada2::assignTaxonomy()`.
+
+```{r}
+taxonomy <- dada2::assignTaxonomy(
+  seqs = seqtab_nochim,
+  refFasta = silva_train_set,
+  taxLevels = c("Kingdom", "Phylum", "Class",
+                "Order", "Family", "Genus",
+                "Species"),
+  multithread = TRUE,
+  minBoot = 60
+)
+```
+
+The method is robust, however, it often fails to assign at the species level.
+
+If you consider that in case an ASV is 100% similar to a reference sequence, it belongs to the same species, then you can use `dada2::addSpecies()`
+
+```{r}
+taxonomy <- dada2::addSpecies(taxonomy,
+                          silva_species_assignment,
+                          allowMultiple = FALSE)
+```
+
+This function assign to the species level ASVs which are identical to a reference sequence.
+
+## Export
+
+All the preprocessing is done. Now we export our results.
+
+### R objects
+
+The results can be exported as a R objects, one object for the ASV table and another one for the taxonomy.
+
+```{r}
+export_folder <- here::here("outputs", "dada2", "asv_table")
+
+if (!dir.exists(export_folder)) dir.create(export_folder)
+
+saveRDS(object = seqtab_nochim,
+        file = file.path(export_folder, "seqtab_nochim.rds"))
+
+saveRDS(object = taxonomy,
+        file = file.path(export_folder, "taxonomy.rds"))
+```
+
+### Text files
+
+We recommand to export your results as text files. They are then easy reusable by other programs/languages.
+
+But before, we need to format the data a little bit.
+
+First we create a new variable to collect the ASV sequences:
+
+```{r}
+asv_seq <- colnames(seqtab_nochim)
+```
+
+We create unique ids for each ASV. The sequence itself is an unique id, but we would like to have something shorter. The ids are generated using the cryptographic hash function SHA-1. A given sequence will always give you the same result, which means that if you have the same id in two different datasets, it means that it is the same sequence. It won't be true for arbitrary ids such as ASV1, ASV2 and so on.
+
+To do so we use the function `digest::digest()`:
+
+```{r}
+asv_id <- sapply(asv_seq,
+                 function(x) unname(digest::digest(x, algo = "sha1")))
+```
+
+and rename the different variables with the new ids
+
+```{r}
+row.names(taxonomy) <- colnames(seqtab_nochim) <- names(asv_seq) <- asv_id
+```
+
+Before exporting the data frames (`taxonomy` and `seqtab_nochim`) as a text file, we convert their row names (ASV ids) into a new column named `asv`. This is achieved using the custom function `df_export()`
+
+```{r}
+taxonomy_export <- df_export(taxonomy, new_rn = "asv")
+
+seqtab_nochim_export <- t(seqtab_nochim)
+seqtab_nochim_export <- df_export(seqtab_nochim_export, new_rn = "asv")
+```
+
+Finally, we can export the taxonomy
+
+```{r}
+write.table(taxonomy_export,
+            file = file.path(export_folder, "taxonomy.tsv"),
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE)
+```
+
+the ASV table
+
+```{r}
+write.table(seqtab_nochim_export,
+            file = file.path(export_folder, "asv_table.tsv"),
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE)
+```
+
+and the sequences as a fasta file
+
+```{r}
+cat(paste0(">", names(asv_seq), "\n", asv_seq),
+    sep = "\n",
+    file = file.path(export_folder, "asv.fasta"))
+```
+
+### Log
+
+Statistics about each preprocessing can also be exported.
+
+First this table need to be assembled:
+
+```{r}
+getN <- function(x) sum(dada2::getUniques(x))
+
+log_table <- data.frame(input = out[, 1],
+                    filtered = out[, 2],
+                    denoisedF = sapply(dadaFs, getN),
+                    denoisedR = sapply(dadaRs, getN),
+                    merged = sapply(mergers, getN),
+                    nonchim = rowSums(seqtab_nochim),
+                    perc_retained = rowSums(seqtab_nochim) / out[, 1] * 100)
+
+rownames(log_table) <- sample_names
+```
+
+Then it can be exported:
+
+```{r}
+df_export(log_table, new_rn = "sample") |>
+  write.table(file = file.path(export_folder, "log_table.tsv"),
+              quote = FALSE,
+              sep = "\t",
+              row.names = FALSE)
+```
